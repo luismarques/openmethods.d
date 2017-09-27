@@ -268,6 +268,46 @@ Runtime.Metrics updateMethods()
   return rt.update();
 }
 
+mixin template RegisterClass(Classes...) {
+  shared static this() {
+    foreach (C; Classes) {
+      debug(explain) {
+        import std.stdio;
+        writefln("Registering class %s", C.stringof);
+      }
+      Runtime.additionalClasses ~= C.classinfo;
+    }
+  }
+
+  shared static ~this()
+  {
+    foreach (C; Classes) {
+      debug(explain) {
+        import std.stdio;
+        writefln("Unregistering class %s", C.stringof);
+      }
+      import std.algorithm, std.array;
+      Runtime.additionalClasses =
+        Runtime.additionalClasses.filter!(c => c != C.classinfo).array;
+      Runtime.needUpdate = true;
+    }
+  }
+}
+
+mixin template DeclareMethod(string ID, R, T...) {
+  import openmethods, std.format;
+  alias _OPENMETHOD_ = Method!(ID, "deallocator", R, T);
+  mixin(format(`alias %s = _OPENMETHOD_.dispatcher;`, ID));
+  mixin(format(`alias %s = _OPENMETHOD_.discriminator;`, ID));
+}
+
+mixin template DefineMethod(alias S) {
+  import std.traits;
+  alias _OPENMETHOD_ =
+    typeof(mixin(__traits(identifier, S)[1..$])(MethodTag.init, Parameters!(S).init));
+  mixin _RegisterSpec!(_OPENMETHOD_, _OPENMETHOD_.Specialization!(S));
+}
+
 bool needUpdateMethods()
 {
   return Runtime.needUpdate;
@@ -723,6 +763,7 @@ struct Runtime
   }
 
   static __gshared Registry methodInfos;
+  static __gshared ClassInfo[] additionalClasses;
   static __gshared Word[] gmtbl; // Global Method Table
   static __gshared Word[] gdtbl; // Global Dispatch Table
   static __gshared needUpdate = true;
@@ -1490,50 +1531,51 @@ string _registerMethods(alias MODULE)()
   return join(code, "\n");
 }
 
+mixin template _RegisterSpec(M, S)
+{
+  static struct Register {
+
+    static __gshared Runtime.SpecInfo si;
+
+    shared static this() {
+      si.pf = cast(void*) S.wrapper;
+
+      debug(explain) {
+        import std.stdio;
+        writefln("Registering override %s%s", M.name, S.SpecParams.stringof);
+      }
+
+      foreach (i, QP; M.QualParams) {
+        static if (IsVirtual!QP) {
+          si.vp ~= S.SpecParams[i].classinfo;
+        }
+      }
+
+      M.info.specInfos ~= &si;
+      si.nextPtr = cast(void**) &M.nextPtr!(S.SpecParams);
+
+      Runtime.needUpdate = true;
+    }
+
+    shared static ~this()
+    {
+      debug(explain) {
+        import std.stdio;
+        writefln("Removing override %s%s", M.name, S.SpecParams.stringof);
+      }
+
+      import std.algorithm, std.array;
+      M.info.specInfos = M.info.specInfos.filter!(p => p != &si).array;
+      Runtime.needUpdate = true;
+    }
+  }
+
+  __gshared Register r;
+}
+
 mixin template _registerSpecs(alias MODULE)
 {
   import openmethods;
-  mixin template wrap(M, S)
-  {
-    static struct Register {
-
-      static __gshared Runtime.SpecInfo si;
-
-      shared static this() {
-        si.pf = cast(void*) S.wrapper;
-
-        debug(explain) {
-          import std.stdio;
-          writefln("Registering override %s%s", M.name, S.SpecParams.stringof);
-        }
-
-        foreach (i, QP; M.QualParams) {
-          static if (IsVirtual!QP) {
-            si.vp ~= S.SpecParams[i].classinfo;
-          }
-        }
-
-        M.info.specInfos ~= &si;
-        si.nextPtr = cast(void**) &M.nextPtr!(S.SpecParams);
-
-        Runtime.needUpdate = true;
-      }
-
-      shared static ~this()
-      {
-        debug(explain) {
-          import std.stdio;
-          writefln("Removing override %s%s", M.name, S.SpecParams.stringof);
-        }
-
-        import std.algorithm, std.array;
-        M.info.specInfos = M.info.specInfos.filter!(p => p != &si).array;
-        Runtime.needUpdate = true;
-      }
-    }
-
-    __gshared Register r;
-  }
 
   import std.traits;
 
@@ -1556,7 +1598,7 @@ mixin template _registerSpecs(alias MODULE)
               }
             }
             alias M = typeof(mixin(_openmethods_id_)(MethodTag.init, Parameters!(_openmethods_o_).init));
-            mixin wrap!(M, M.Specialization!(_openmethods_o_));
+            mixin _RegisterSpec!(M, M.Specialization!(_openmethods_o_));
           }
         }
       }
